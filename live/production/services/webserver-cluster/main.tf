@@ -18,12 +18,12 @@ module "webserver_cluster" {
   cluster_name = "felix-ws-day11-production"
   environment  = "production"
 
-  server_port                = 8080
-  enable_autoscaling         = true
-  enable_detailed_monitoring = true
-  create_dns_record          = false
-  use_existing_vpc           = false
-  existing_vpc_name          = "existing-vpc"
+  server_port                 = 8080
+  enable_autoscaling          = true
+  enable_detailed_monitoring  = true
+  create_dns_record           = false
+  use_existing_vpc            = false
+  existing_vpc_name           = "existing-vpc"
 
   custom_tags = {
     Environment = "production"

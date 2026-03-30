@@ -1,0 +1,108 @@
+Day 11 Submission — Mastering Terraform Conditionals
+
+Locals-Centralised Conditional Logic
+locals {
+  is_production = var.environment == "production"
+
+  instance_type = local.is_production ? "t2.medium" : "t2.micro"
+  min_size      = local.is_production ? 3 : 1
+  max_size      = local.is_production ? 10 : 3
+
+  monitoring_enabled  = local.is_production || var.enable_detailed_monitoring
+  autoscaling_enabled = var.enable_autoscaling
+
+  vpc_id = var.use_existing_vpc ? data.aws_vpc.existing[0].id : aws_vpc.new[0].id
+  subnet_ids = var.use_existing_vpc ? data.aws_subnets.existing[0].ids : aws_subnet.public[*].id
+}
+This is better than scattered ternaries because I can audit all environment behavior in one file. Resource blocks stay simple and reusable, and changing policy (for example prod sizing) happens once, not in many places.
+
+Conditional Resource Creation
+resource "aws_autoscaling_policy" "scale_out" {
+  count = local.autoscaling_enabled ? 1 : 0
+  name                   = "${var.cluster_name}-scale-out"
+  scaling_adjustment     = 1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 300
+  autoscaling_group_name = aws_autoscaling_group.web.name
+}
+
+resource "aws_cloudwatch_metric_alarm" "high_cpu" {
+  count = local.monitoring_enabled ? 1 : 0
+  alarm_name          = "${var.cluster_name}-high-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 120
+  statistic           = "Average"
+  threshold           = 80
+}
+
+resource "aws_route53_record" "alb" {
+  count = var.create_dns_record ? 1 : 0
+  zone_id = data.aws_route53_zone.primary[0].zone_id
+  name    = var.domain_name
+  type    = "A"
+}
+Plan evidence:
+- Monitoring disabled (dev): Plan: 19 to add, 0 to change, 0 to destroy; monitoring_enabled = false; no high_cpu alarm resource in plan.
+- Monitoring enabled (dev toggle): Plan: 20 to add, 0 to change, 0 to destroy; monitoring_enabled = true; aws_cloudwatch_metric_alarm.high_cpu[0] appears.
+
+Safe Output References
+output "scale_out_policy_arn" {
+  value = local.autoscaling_enabled ? aws_autoscaling_policy.scale_out[0].arn : null
+}
+output "high_cpu_alarm_arn" {
+  value = local.monitoring_enabled ? aws_cloudwatch_metric_alarm.high_cpu[0].arn : null
+}
+output "dns_record_fqdn" {
+  value = var.create_dns_record ? aws_route53_record.alb[0].fqdn : null
+}
+Without the ternary guard, Terraform would try to read [0] even when count is 0 and fail with an index-out-of-range error.
+
+Environment-Aware Module
+variable "environment" {
+  description = "Deployment environment: dev, staging, or production"
+  type        = string
+  default     = "dev"
+  validation {
+    condition     = contains(["dev", "staging", "production"], var.environment)
+    error_message = "Environment must be dev, staging, or production."
+  }
+}
+Plan differences:
+- Dev plan: instance_type = "t2.micro", min_size = 1, max_size = 3
+- Production plan: instance_type = "t2.medium", min_size = 3, max_size = 10
+This confirms one module changes behavior by environment only.
+
+Input Validation Block
+validation {
+  condition     = contains(["dev", "staging", "production"], var.environment)
+  error_message = "Environment must be dev, staging, or production."
+}
+Terraform error with invalid value:
+Error: Invalid value for variable
+var.environment is "qa"
+Environment must be dev, staging, or production.
+
+Conditional Data Source Pattern
+data "aws_vpc" "existing" {
+  count = var.use_existing_vpc ? 1 : 0
+  tags = { Name = var.existing_vpc_name }
+}
+resource "aws_vpc" "new" {
+  count = var.use_existing_vpc ? 0 : 1
+  cidr_block = var.new_vpc_cidr
+}
+locals {
+  vpc_id = var.use_existing_vpc ? data.aws_vpc.existing[0].id : aws_vpc.new[0].id
+}
+This supports brownfield (plug into existing VPC) and greenfield (create new VPC/subnets) with one module.
+
+Chapter 5 Learnings
+A conditional expression picks a value inside an argument. Conditional resource creation controls whether a resource exists at all using count/for_each. You cannot use one conditional to switch a resource block between two different resource types, because resource type is static in Terraform. You model that by defining both resources and enabling only one.
+
+Challenges and Fixes
+1) Index errors on optional resources: fixed by guarded outputs using condition ? resource[0] : null.
+2) Validation failures: fixed by strict allowed-values list and testing invalid input ("qa").
+3) Plan-time evaluation issues in VPC mode: fixed by matching count logic and using locals to choose valid branch references.
